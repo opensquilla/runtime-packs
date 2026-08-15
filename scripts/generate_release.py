@@ -42,6 +42,18 @@ PACK_METADATA_FIELDS = {
     "unpackedSizeBytes",
     "sha256",
 }
+CATALOG_COMPONENT_BASE_FIELDS = {
+    "asset",
+    "archiveType",
+    "version",
+    "sizeBytes",
+    "unpackedSizeBytes",
+    "sha256",
+}
+CATALOG_COMPONENT_FIELDS = {
+    *CATALOG_COMPONENT_BASE_FIELDS,
+    "trustedArchiveSha256",
+}
 
 
 class ReleaseBuildError(RuntimeError):
@@ -83,6 +95,47 @@ def _validate_metadata(metadata: Mapping[str, Any], path: Path) -> None:
         raise ReleaseBuildError(f"pack metadata unpacked size is unsafe: {path.name}")
     if not SHA_RE.fullmatch(str(metadata["sha256"])):
         raise ReleaseBuildError(f"pack metadata SHA-256 is invalid: {path.name}")
+
+
+def _catalog_component_entry(
+    metadata: Mapping[str, Any],
+    source_component: Mapping[str, Any],
+) -> dict[str, Any]:
+    trusted_archive_sha256 = list(source_component["trustedArchiveSha256"])
+    if metadata["sha256"] in trusted_archive_sha256:
+        raise ReleaseBuildError(
+            "trusted Runtime Pack archive history contains the current pack SHA-256: "
+            f"{metadata['target']}/{metadata['componentId']}"
+        )
+    return {
+        "asset": metadata["asset"],
+        "archiveType": "tar.xz",
+        "version": metadata["version"],
+        "sizeBytes": metadata["sizeBytes"],
+        "unpackedSizeBytes": metadata["unpackedSizeBytes"],
+        "sha256": metadata["sha256"],
+        "trustedArchiveSha256": trusted_archive_sha256,
+    }
+
+
+def _validate_release_archive_history(
+    current_archive_sha256: Mapping[tuple[str, str], str],
+    sources: Mapping[str, Any],
+) -> None:
+    current_owners = {
+        digest: f"{target}/{component_id}"
+        for (target, component_id), digest in current_archive_sha256.items()
+    }
+    for target, component_ids in TARGET_COMPONENTS.items():
+        for component_id in component_ids:
+            history = sources["targets"][target][component_id]["trustedArchiveSha256"]
+            for digest in history:
+                current_owner = current_owners.get(digest)
+                if current_owner is not None:
+                    raise ReleaseBuildError(
+                        "trusted Runtime Pack archive history contains a current pack "
+                        f"SHA-256 for {current_owner}: {target}/{component_id}"
+                    )
 
 
 def _register_pack_path(
@@ -327,6 +380,10 @@ def generate_release(sources_path: Path, build_dir: Path, output_dir: Path) -> d
         missing = sorted(expected_keys - set(metadata_files))
         extra = sorted(set(metadata_files) - expected_keys)
         raise ReleaseBuildError(f"native pack matrix mismatch; missing={missing}, extra={extra}")
+    _validate_release_archive_history(
+        {key: metadata["sha256"] for key, (_path, metadata) in metadata_files.items()},
+        sources,
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
     targets: dict[str, dict[str, Any]] = {target: {} for target in TARGET_COMPONENTS}
     pack_sboms: list[dict[str, Any]] = []
@@ -355,14 +412,10 @@ def generate_release(sources_path: Path, build_dir: Path, output_dir: Path) -> d
             destination = output_dir / expected_name
             if destination.resolve() != pack_path.resolve():
                 shutil.copyfile(pack_path, destination)
-            targets[target][component_id] = {
-                "asset": expected_name,
-                "archiveType": "tar.xz",
-                "version": metadata["version"],
-                "sizeBytes": metadata["sizeBytes"],
-                "unpackedSizeBytes": metadata["unpackedSizeBytes"],
-                "sha256": metadata["sha256"],
-            }
+            targets[target][component_id] = _catalog_component_entry(
+                metadata,
+                source_component,
+            )
             pack_names.append(expected_name)
     catalog = {
         "schemaVersion": 1,
@@ -524,42 +577,45 @@ def audit_published_release(
     if not isinstance(targets, dict) or set(targets) != set(TARGET_COMPONENTS):
         raise ReleaseBuildError("release catalog target matrix is incomplete")
 
-    pack_names: set[str] = set()
-    pack_sboms: list[dict[str, Any]] = []
+    current_archive_sha256: dict[tuple[str, str], str] = {}
     for target, component_ids in TARGET_COMPONENTS.items():
         components = targets.get(target)
         if not isinstance(components, dict) or set(components) != set(component_ids):
             raise ReleaseBuildError(f"release catalog components are incomplete: {target}")
         for component_id in component_ids:
             value = components[component_id]
-            if not isinstance(value, dict) or set(value) != {
-                "asset",
-                "archiveType",
-                "version",
-                "sizeBytes",
-                "unpackedSizeBytes",
-                "sha256",
-            }:
+            if not isinstance(value, dict) or set(value) != CATALOG_COMPONENT_FIELDS:
                 raise ReleaseBuildError(
                     f"release catalog entry is invalid: {target}/{component_id}"
                 )
+            current_archive_sha256[(target, component_id)] = str(value["sha256"])
+    _validate_release_archive_history(current_archive_sha256, sources)
+
+    pack_names: set[str] = set()
+    pack_sboms: list[dict[str, Any]] = []
+    for target, component_ids in TARGET_COMPONENTS.items():
+        components = targets[target]
+        for component_id in component_ids:
+            value = components[component_id]
             expected_name = (
                 f"OpenSquilla-Runtime-{component_id}-{sources['catalogVersion']}-{target}.tar.xz"
             )
             source_component = sources["targets"][target][component_id]
+            metadata = {
+                "target": target,
+                "componentId": component_id,
+                **{field: value[field] for field in CATALOG_COMPONENT_BASE_FIELDS},
+            }
+            expected_entry = _catalog_component_entry(metadata, source_component)
             if (
                 value.get("asset") != expected_name
                 or value.get("archiveType") != "tar.xz"
                 or value.get("version") != source_component["version"]
+                or value != expected_entry
             ):
                 raise ReleaseBuildError(
                     f"release catalog entry differs from reviewed sources: {target}/{component_id}"
                 )
-            metadata = {
-                "target": target,
-                "componentId": component_id,
-                **value,
-            }
             pack_sboms.append(
                 audit_pack_archive(
                     release_dir / expected_name,

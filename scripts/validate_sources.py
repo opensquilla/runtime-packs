@@ -34,6 +34,7 @@ ARCHIVE_TYPES = {"tar.gz", "tar.xz", "zip", "7z-sfx"}
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 SAFE_VALUE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$")
 CATALOG_VERSION_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})\.([1-9]\d*)$")
+MAX_TRUSTED_ARCHIVE_DIGESTS = 8
 
 
 class SourceValidationError(ValueError):
@@ -72,6 +73,7 @@ def _validate_component(target: str, component_id: str, value: Any) -> None:
         "version",
         "url",
         "sha256",
+        "trustedArchiveSha256",
         "archiveType",
         "stripComponents",
         "binDirs",
@@ -100,6 +102,26 @@ def _validate_component(target: str, component_id: str, value: Any) -> None:
         raise SourceValidationError(f"{field}.url must identify one immutable asset path")
     if not SHA256_RE.fullmatch(str(component["sha256"])):
         raise SourceValidationError(f"{field}.sha256 must be lowercase SHA-256")
+    trusted_digests = component["trustedArchiveSha256"]
+    if not isinstance(trusted_digests, list):
+        raise SourceValidationError(f"{field}.trustedArchiveSha256 must be an array")
+    if len(trusted_digests) > MAX_TRUSTED_ARCHIVE_DIGESTS:
+        raise SourceValidationError(
+            f"{field}.trustedArchiveSha256 exceeds the reviewed history limit"
+        )
+    if any(
+        not isinstance(digest, str) or not SHA256_RE.fullmatch(digest)
+        for digest in trusted_digests
+    ):
+        raise SourceValidationError(
+            f"{field}.trustedArchiveSha256 must contain lowercase SHA-256 values"
+        )
+    if len(set(trusted_digests)) != len(trusted_digests):
+        raise SourceValidationError(f"{field}.trustedArchiveSha256 contains duplicates")
+    if component["sha256"] in trusted_digests:
+        raise SourceValidationError(
+            f"{field}.trustedArchiveSha256 contains the current upstream archive SHA-256"
+        )
     if component["archiveType"] not in ARCHIVE_TYPES:
         raise SourceValidationError(f"{field}.archiveType is unsupported")
     if (component["archiveType"] == "7z-sfx") != (component_id == "gitBash"):
@@ -157,6 +179,7 @@ def validate_sources(raw: Any) -> dict[str, Any]:
     if set(targets) != set(TARGET_COMPONENTS):
         raise SourceValidationError("targets must contain the complete six-target matrix")
     seen_urls: set[str] = set()
+    seen_trusted_archive_digests: set[str] = set()
     component_versions: dict[str, str] = {}
     for target, expected_components in TARGET_COMPONENTS.items():
         target_value = _mapping(targets[target], f"targets.{target}")
@@ -178,6 +201,14 @@ def validate_sources(raw: Any) -> dict[str, Any]:
             if url in seen_urls:
                 raise SourceValidationError(f"upstream URL is reused: {url}")
             seen_urls.add(url)
+            trusted_digests = component_mapping["trustedArchiveSha256"]
+            reused_digests = seen_trusted_archive_digests.intersection(trusted_digests)
+            if reused_digests:
+                raise SourceValidationError(
+                    "trusted Runtime Pack archive SHA-256 is reused across components: "
+                    + ", ".join(sorted(reused_digests))
+                )
+            seen_trusted_archive_digests.update(trusted_digests)
             version = str(component_mapping["version"])
             previous_version = component_versions.setdefault(component_id, version)
             if version != previous_version:

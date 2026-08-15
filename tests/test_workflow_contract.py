@@ -85,3 +85,18 @@ def test_catalog_identity_matches_release_tag_contract() -> None:
     sources = json.loads((ROOT / "sources.json").read_text(encoding="utf-8"))
     assert sources["catalogVersion"] == "2026-07-30.1"
     assert sources["releaseTag"] == "v2026.07.30.1"
+
+
+def test_repository_publishes_the_complete_apache_2_license() -> None:
+    license_text = (ROOT / "LICENSE").read_text(encoding="utf-8")
+    assert "Apache License\n                           Version 2.0, January 2004" in license_text
+    assert "TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION" in license_text
+    assert all(f"   {section}." in license_text for section in range(1, 10))
+    assert "END OF TERMS AND CONDITIONS" in license_text
+    assert "APPENDIX: How to apply the Apache License to your work." in license_text
+    assert 'license = { text = "Apache-2.0" }' in (ROOT / "pyproject.toml").read_text(
+        encoding="utf-8"
+    )
+    assert "[Apache License 2.0](LICENSE)" in (ROOT / "README.md").read_text(
+        encoding="utf-8"
+    )

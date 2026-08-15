@@ -3,7 +3,9 @@
 This repository builds the optional Python, Node.js, and Git Bash runtimes used by
 OpenSquilla. The desktop application embeds an immutable catalog containing each
 archive's exact filename, size, and SHA-256 digest. It never trusts a mutable remote
-catalog or a caller-provided URL.
+catalog or a caller-provided URL. Each component entry also carries a bounded,
+reviewed `trustedArchiveSha256` history so an already-installed older Runtime Pack can
+remain trusted after a catalog upgrade without weakening integrity checks.
 
 Runtime Packs are release artifacts, not application updates. Every archive contains
 only these top-level entries:
@@ -34,6 +36,8 @@ system and CPU architecture. Source archives, versions, and digests are pinned i
 ## Trust and release policy
 
 - Upstream bytes are accepted only after their pinned SHA-256 is verified.
+- Historical Runtime Pack digests must be unique, lowercase SHA-256 values and must
+  never repeat the current pack digest. The first release starts with empty histories.
 - Git for Windows self-extracting archives are unpacked only inside trusted CI; the
   OpenSquilla client never downloads or executes the SFX.
 - Pack extraction rejects traversal, link escapes, special files, duplicate paths,
@@ -73,3 +77,10 @@ Before approving a Draft Release, reviewers must independently confirm every ups
 URL and SHA-256 pin, all fourteen native probe jobs, the exact asset inventory,
 `SHA256SUMS`, both SBOM layers, and third-party notices. Publishing is the human stop
 gate; a published catalog is never repaired in place.
+
+## License
+
+This repository's original build tooling is licensed under the
+[Apache License 2.0](LICENSE). Runtime Pack artifacts contain third-party software
+under the licenses preserved inside each archive and summarized in the release's
+`THIRD_PARTY_NOTICES.md`.
