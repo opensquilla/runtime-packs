@@ -1,0 +1,258 @@
+name: Mirror Published Runtime Packs to Beijing OSS
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      releaseTag:
+        description: Published immutable Runtime Pack tag
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runtime-pack-oss-mirror-${{ github.event.release.tag_name || inputs.releaseTag }}
+  cancel-in-progress: false
+
+env:
+  OSSUTIL_VERSION: "2.3.0"
+  OSSUTIL_ZIP: ossutil-2.3.0-linux-amd64.zip
+  OSSUTIL_SHA256: 3ae4d9fc85a7a6e9f5654d1599766f1a3a42a3692870887b5ae9338d582ef65a
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    environment: runtime-pack-oss
+    env:
+      OSS_BUCKET: ${{ vars.RUNTIME_PACK_OSS_BUCKET }}
+      OSS_ACCESS_KEY_ID: ${{ secrets.RUNTIME_PACK_OSS_ACCESS_KEY_ID }}
+      OSS_ACCESS_KEY_SECRET: ${{ secrets.RUNTIME_PACK_OSS_ACCESS_KEY_SECRET }}
+      OSS_REGION: cn-beijing
+      OSS_ENDPOINT: ${{ vars.RUNTIME_PACK_OSS_ENDPOINT }}
+    steps:
+      - name: Resolve and validate published tag
+        id: release
+        env:
+          EVENT_TAG: ${{ github.event.release.tag_name }}
+          INPUT_TAG: ${{ inputs.releaseTag }}
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${EVENT_TAG:-${INPUT_TAG:-}}"
+          if [[ ! "${tag}" =~ ^v[0-9]{4}[.][0-9]{2}[.][0-9]{2}[.][0-9]+$ ]]; then
+            echo "Invalid Runtime Pack release tag: ${tag}" >&2
+            exit 1
+          fi
+          release_json="$(gh api \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}")"
+          is_draft="$(jq -r '.draft' <<<"${release_json}")"
+          if [[ "${is_draft}" != "false" ]]; then
+            echo "Only a human-published non-draft release may be mirrored." >&2
+            exit 1
+          fi
+          immutable="$(jq -r '.immutable // false' <<<"${release_json}")"
+          if [[ "${immutable}" != "true" ]]; then
+            echo "GitHub Release immutability must be enabled before mirroring." >&2
+            exit 1
+          fi
+          printf 'tag=%s\n' "${tag}" >> "${GITHUB_OUTPUT}"
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ steps.release.outputs.tag }}
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+      - name: Require the tag's reviewed source contract
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/validate_sources.py sources.json
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          sources = json.loads(Path("sources.json").read_text(encoding="utf-8"))
+          if sources["releaseTag"] != os.environ["RELEASE_TAG"]:
+              raise SystemExit("published tag differs from the checked-out source contract")
+          PY
+      - name: Require restricted OSS configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -n "${OSS_BUCKET}" ]] || { echo 'Missing RUNTIME_PACK_OSS_BUCKET' >&2; exit 1; }
+          [[ -n "${OSS_ACCESS_KEY_ID}" ]] || { echo 'Missing RUNTIME_PACK_OSS_ACCESS_KEY_ID' >&2; exit 1; }
+          [[ -n "${OSS_ACCESS_KEY_SECRET}" ]] || { echo 'Missing RUNTIME_PACK_OSS_ACCESS_KEY_SECRET' >&2; exit 1; }
+          [[ "${OSS_BUCKET}" == "opensquilla-releases" ]] || {
+            echo 'Runtime Packs must mirror to the reviewed opensquilla-releases bucket.' >&2
+            exit 1
+          }
+          [[ "${OSS_ENDPOINT}" == "https://oss-cn-beijing.aliyuncs.com" ]] || {
+            echo 'Runtime Packs must use the public Beijing OSS endpoint.' >&2
+            exit 1
+          }
+      - name: Download and audit exact GitHub Release asset set
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir release-dist
+          gh release download "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --dir release-dist
+          python -m scripts.generate_release \
+            --sources sources.json \
+            --audit-only \
+            --output-dir release-dist
+      - name: Install pinned ossutil
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSLO "https://gosspublic.alicdn.com/ossutil/v2/${OSSUTIL_VERSION}/${OSSUTIL_ZIP}"
+          echo "${OSSUTIL_SHA256}  ${OSSUTIL_ZIP}" | sha256sum -c -
+          unzip -q "${OSSUTIL_ZIP}"
+          sudo install -m 0755 "ossutil-${OSSUTIL_VERSION}-linux-amd64/ossutil" /usr/local/bin/ossutil
+      - name: Require overwrite-safe bucket versioning state
+        shell: bash
+        run: |
+          set -euo pipefail
+          ossutil api get-bucket-versioning \
+            --bucket "${OSS_BUCKET}" \
+            --endpoint "${OSS_ENDPOINT}" \
+            --output-format json > bucket-versioning.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          value = json.loads(Path("bucket-versioning.json").read_text(encoding="utf-8"))
+
+          def statuses(node):
+              if isinstance(node, dict):
+                  for key, child in node.items():
+                      if key.casefold() == "status" and isinstance(child, str) and child:
+                          yield child
+                      yield from statuses(child)
+              elif isinstance(node, list):
+                  for child in node:
+                      yield from statuses(child)
+
+          active = list(statuses(value))
+          if active:
+              raise SystemExit(
+                  "OSS bucket versioning must be unconfigured because PutObject "
+                  f"forbid-overwrite is ignored when versioning is active or suspended: {active}"
+              )
+          PY
+      - name: Mirror only immutable version-scoped objects and read them back
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p readback
+          object_exists() {
+            local object="$1"
+            local listing
+            listing="$(ossutil ls --short-format "${object}" --endpoint "${OSS_ENDPOINT}")" || return 2
+            grep -Fxq "${object}" <<<"${listing}"
+          }
+          verify_object() {
+            local source="$1"
+            local name="$2"
+            local object="oss://${OSS_BUCKET}/runtime-packs/${RELEASE_TAG}/${name}"
+            ossutil cp --force "${object}" "readback/${name}" --endpoint "${OSS_ENDPOINT}"
+            local local_sha remote_sha
+            local_sha="$(sha256sum "${source}" | awk '{print $1}')"
+            remote_sha="$(sha256sum "readback/${name}" | awk '{print $1}')"
+            [[ "${local_sha}" == "${remote_sha}" ]] || {
+              echo "OSS readback mismatch for ${name}" >&2
+              exit 1
+            }
+          }
+          for source in release-dist/*; do
+            name="$(basename "${source}")"
+            object="oss://${OSS_BUCKET}/runtime-packs/${RELEASE_TAG}/${name}"
+            if object_exists "${object}"; then
+              verify_object "${source}" "${name}"
+              echo "Existing immutable object matches: ${object}"
+              continue
+            else
+              status="$?"
+              [[ "${status}" == 1 ]] || exit "${status}"
+            fi
+            source_path="$(realpath "${source}")"
+            if ! ossutil api put-object \
+              --bucket "${OSS_BUCKET}" \
+              --key "runtime-packs/${RELEASE_TAG}/${name}" \
+              --forbid-overwrite true \
+              --cache-control "public,max-age=31536000,immutable" \
+              --body "file://${source_path}" \
+              --endpoint "${OSS_ENDPOINT}"; then
+              if object_exists "${object}"; then
+                verify_object "${source}" "${name}"
+                continue
+              fi
+              exit 1
+            fi
+            verify_object "${source}" "${name}"
+          done
+      - name: Verify GitHub and OSS inventories byte for byte
+        shell: bash
+        run: |
+          set -euo pipefail
+          ossutil api list-objects-v2 \
+            --bucket "${OSS_BUCKET}" \
+            --prefix "runtime-packs/${{ steps.release.outputs.tag }}/" \
+            --max-keys 1000 \
+            --endpoint "${OSS_ENDPOINT}" \
+            --output-format json > oss-inventory.json
+          RELEASE_TAG='${{ steps.release.outputs.tag }}' python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          value = json.loads(Path("oss-inventory.json").read_text(encoding="utf-8"))
+          expected = {
+              f"runtime-packs/{os.environ['RELEASE_TAG']}/{path.name}"
+              for path in Path("release-dist").iterdir()
+              if path.is_file()
+          }
+
+          def values_for_key(node, wanted):
+              if isinstance(node, dict):
+                  for key, child in node.items():
+                      if key.casefold() == wanted.casefold():
+                          yield child
+                      yield from values_for_key(child, wanted)
+              elif isinstance(node, list):
+                  for child in node:
+                      yield from values_for_key(child, wanted)
+
+          if any(value is True or str(value).casefold() == "true" for value in values_for_key(value, "IsTruncated")):
+              raise SystemExit("OSS inventory unexpectedly exceeded one page")
+          actual = {
+              key
+              for key in values_for_key(value, "Key")
+              if isinstance(key, str) and key.startswith(f"runtime-packs/{os.environ['RELEASE_TAG']}/")
+          }
+          if actual != expected:
+              raise SystemExit(
+                  f"OSS exact object set mismatch; missing={sorted(expected - actual)}, "
+                  f"extra={sorted(actual - expected)}"
+              )
+          PY
+          python -m scripts.generate_release \
+            --sources sources.json \
+            --audit-only \
+            --output-dir readback
+          diff -u \
+            <(cd release-dist && sha256sum -- * | sort) \
+            <(cd readback && sha256sum -- * | sort)
