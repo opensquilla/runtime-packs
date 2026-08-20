@@ -5,7 +5,7 @@ import io
 import json
 import subprocess
 import tarfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -14,6 +14,7 @@ from scripts.build_pack import (
     _audit_7z_listing_text,
     _deterministic_tar_xz,
     _extract_tar,
+    _register_path_shape,
     _verify_authenticode_signature,
     collect_licenses,
     sha256_file,
@@ -90,6 +91,44 @@ def test_tar_extraction_rejects_file_directory_shadowing(tmp_path: Path) -> None
         handle.addfile(child, io.BytesIO(b"y"))
     with pytest.raises(PackBuildError, match="descends through a file"):
         _extract_tar(archive, tmp_path / "payload", 1)
+
+
+def test_tar_extraction_preserves_case_distinct_linux_paths(tmp_path: Path) -> None:
+    archive = tmp_path / "input.tar.gz"
+    with tarfile.open(archive, "w:gz") as handle:
+        for name, data in (
+            ("root/share/terminfo/E/Eterm", b"upper"),
+            ("root/share/terminfo/e/eterm", b"lower"),
+        ):
+            member = tarfile.TarInfo(name)
+            member.size = len(data)
+            handle.addfile(member, io.BytesIO(data))
+
+    with pytest.raises(PackBuildError, match="duplicate archive member"):
+        _extract_tar(archive, tmp_path / "portable", 1)
+
+    kinds: dict[str, str] = {}
+    parent_keys: set[str] = set()
+    for relative in (
+        PurePosixPath("share/terminfo/E/Eterm"),
+        PurePosixPath("share/terminfo/e/eterm"),
+    ):
+        _register_path_shape(
+            relative,
+            "file",
+            kinds,
+            parent_keys,
+            case_sensitive=True,
+        )
+    assert len(kinds) == 2
+
+    linux_payload = tmp_path / "linux"
+    case_probe = tmp_path / "case-probe"
+    (case_probe / "E").mkdir(parents=True)
+    if not (case_probe / "e").exists():
+        _extract_tar(archive, linux_payload, 1, case_sensitive_paths=True)
+        assert (linux_payload / "share/terminfo/E/Eterm").read_bytes() == b"upper"
+        assert (linux_payload / "share/terminfo/e/eterm").read_bytes() == b"lower"
 
 
 def test_git_sfx_listing_rejects_traversal_and_links() -> None:

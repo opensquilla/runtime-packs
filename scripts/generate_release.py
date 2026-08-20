@@ -143,19 +143,23 @@ def _register_pack_path(
     kind: str,
     kinds: dict[str, str],
     parent_keys: set[str],
+    *,
+    case_sensitive: bool,
 ) -> None:
-    key = _portable_key(relative)
+    key = _portable_key(relative, case_sensitive=case_sensitive)
     if key in kinds:
         raise ReleaseBuildError(f"pack has duplicate paths: {relative}")
     ancestors = [PurePosixPath(*relative.parts[:index]) for index in range(1, len(relative.parts))]
     for ancestor in ancestors:
-        ancestor_kind = kinds.get(_portable_key(ancestor))
+        ancestor_kind = kinds.get(_portable_key(ancestor, case_sensitive=case_sensitive))
         if ancestor_kind is not None and ancestor_kind != "directory":
             raise ReleaseBuildError(f"pack path descends through a file: {relative}")
     if kind != "directory" and key in parent_keys:
         raise ReleaseBuildError(f"pack file shadows an existing directory: {relative}")
     kinds[key] = kind
-    parent_keys.update(_portable_key(ancestor) for ancestor in ancestors)
+    parent_keys.update(
+        _portable_key(ancestor, case_sensitive=case_sensitive) for ancestor in ancestors
+    )
 
 
 def _read_member_bytes(archive: tarfile.TarFile, member: tarfile.TarInfo, limit: int) -> bytes:
@@ -211,6 +215,7 @@ def audit_pack_archive(
     payload_hashes: dict[str, str] = {}
     license_files = 0
     member_names: list[str] = []
+    case_sensitive_paths = str(metadata["target"]).startswith("linux-")
     with tarfile.open(path, mode="r:xz") as archive:
         for index, member in enumerate(archive, 1):
             if index > MAX_MEMBERS:
@@ -225,7 +230,13 @@ def audit_pack_archive(
                 kind = "file"
             else:
                 raise ReleaseBuildError(f"pack contains an unsupported member: {path.name}")
-            _register_pack_path(relative, kind, kinds, parent_keys)
+            _register_pack_path(
+                relative,
+                kind,
+                kinds,
+                parent_keys,
+                case_sensitive=case_sensitive_paths,
+            )
             member_names.append(relative.as_posix())
             if source_date_epoch is not None:
                 if member.mtime != source_date_epoch or member.uid != 0 or member.gid != 0:
@@ -301,7 +312,9 @@ def audit_pack_archive(
             raise ReleaseBuildError(f"pack manifest bin directory is invalid: {path.name}")
         directory_name = "payload" if relative_directory == "." else "payload/" + relative_directory
         directory = _safe_name(directory_name)
-        if kinds.get(_portable_key(directory)) != "directory" and not any(
+        if kinds.get(
+            _portable_key(directory, case_sensitive=case_sensitive_paths)
+        ) != "directory" and not any(
             name.startswith("./" + directory.as_posix() + "/") for name in payload_hashes
         ):
             raise ReleaseBuildError(f"pack bin directory is missing: {path.name}")

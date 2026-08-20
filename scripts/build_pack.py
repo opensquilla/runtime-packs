@@ -168,8 +168,9 @@ def _safe_member_path(raw_name: str, strip_components: int) -> PurePosixPath | N
     return stripped
 
 
-def _portable_key(path: PurePosixPath) -> str:
-    return "/".join(unicodedata.normalize("NFC", part).casefold() for part in path.parts)
+def _portable_key(path: PurePosixPath, *, case_sensitive: bool = False) -> str:
+    normalized = "/".join(unicodedata.normalize("NFC", part) for part in path.parts)
+    return normalized if case_sensitive else normalized.casefold()
 
 
 def _register_path_shape(
@@ -177,19 +178,23 @@ def _register_path_shape(
     kind: str,
     kinds: dict[str, str],
     parent_keys: set[str],
+    *,
+    case_sensitive: bool = False,
 ) -> None:
-    key = _portable_key(relative)
+    key = _portable_key(relative, case_sensitive=case_sensitive)
     if key in kinds:
         raise PackBuildError(f"duplicate archive member: {relative}")
     ancestors = [PurePosixPath(*relative.parts[:index]) for index in range(1, len(relative.parts))]
     for ancestor in ancestors:
-        ancestor_kind = kinds.get(_portable_key(ancestor))
+        ancestor_kind = kinds.get(_portable_key(ancestor, case_sensitive=case_sensitive))
         if ancestor_kind is not None and ancestor_kind != "directory":
             raise PackBuildError(f"archive path descends through a file: {relative}")
     if kind != "directory" and key in parent_keys:
         raise PackBuildError(f"archive file shadows an existing directory: {relative}")
     kinds[key] = kind
-    parent_keys.update(_portable_key(ancestor) for ancestor in ancestors)
+    parent_keys.update(
+        _portable_key(ancestor, case_sensitive=case_sensitive) for ancestor in ancestors
+    )
 
 
 def _resolve_tar_link_path(
@@ -250,7 +255,13 @@ def _copy_exact(source: BinaryIO, destination: Path, expected_size: int) -> None
             raise PackBuildError("archive member exceeded its declared size")
 
 
-def _extract_tar(archive: Path, payload: Path, strip_components: int) -> None:
+def _extract_tar(
+    archive: Path,
+    payload: Path,
+    strip_components: int,
+    *,
+    case_sensitive_paths: bool = False,
+) -> None:
     entries: list[tuple[tarfile.TarInfo, PurePosixPath, str]] = []
     kinds: dict[str, str] = {}
     parent_keys: set[str] = set()
@@ -268,7 +279,13 @@ def _extract_tar(archive: Path, payload: Path, strip_components: int) -> None:
                 kind = "link"
             else:
                 raise PackBuildError(f"unsupported archive member: {relative}")
-            _register_path_shape(relative, kind, kinds, parent_keys)
+            _register_path_shape(
+                relative,
+                kind,
+                kinds,
+                parent_keys,
+                case_sensitive=case_sensitive_paths,
+            )
             if member.isfile():
                 if member.size < 0:
                     raise PackBuildError("archive member has a negative size")
@@ -291,13 +308,17 @@ def _extract_tar(archive: Path, payload: Path, strip_components: int) -> None:
                 destination.chmod(0o755)
 
         by_key = {
-            _portable_key(relative): (member, relative, kind)
+            _portable_key(relative, case_sensitive=case_sensitive_paths): (
+                member,
+                relative,
+                kind,
+            )
             for member, relative, kind in entries
         }
         resolving: set[str] = set()
 
         def materialize(relative: PurePosixPath) -> Path:
-            key = _portable_key(relative)
+            key = _portable_key(relative, case_sensitive=case_sensitive_paths)
             entry = by_key.get(key)
             if entry is None:
                 raise PackBuildError(f"archive link target is missing: {relative}")
@@ -328,7 +349,11 @@ def _extract_tar(archive: Path, payload: Path, strip_components: int) -> None:
             if kind == "link":
                 materialize(relative)
 
-    _validate_physical_tree(payload, compressed_bytes=archive.stat().st_size)
+    _validate_physical_tree(
+        payload,
+        compressed_bytes=archive.stat().st_size,
+        case_sensitive_paths=case_sensitive_paths,
+    )
 
 
 def _zip_kind(info: zipfile.ZipInfo) -> str:
@@ -380,13 +405,18 @@ def _extract_zip(archive: Path, payload: Path, strip_components: int) -> None:
     _validate_physical_tree(payload, compressed_bytes=archive.stat().st_size)
 
 
-def _validate_physical_tree(root: Path, *, compressed_bytes: int = 0) -> None:
+def _validate_physical_tree(
+    root: Path,
+    *,
+    compressed_bytes: int = 0,
+    case_sensitive_paths: bool = False,
+) -> None:
     seen: set[str] = set()
     total_bytes = 0
     count = 0
     for path in sorted(root.rglob("*"), key=lambda item: item.as_posix().casefold()):
         relative = path.relative_to(root)
-        key = relative.as_posix().casefold()
+        key = _portable_key(relative, case_sensitive=case_sensitive_paths)
         if key in seen:
             raise PackBuildError(f"case-insensitive duplicate extracted path: {relative}")
         seen.add(key)
@@ -471,10 +501,17 @@ def extract_upstream(
     archive_type: str,
     strip_components: int,
     payload: Path,
+    *,
+    case_sensitive_paths: bool = False,
 ) -> None:
     payload.mkdir(parents=True, exist_ok=False)
     if archive_type in {"tar.gz", "tar.xz"}:
-        _extract_tar(archive, payload, strip_components)
+        _extract_tar(
+            archive,
+            payload,
+            strip_components,
+            case_sensitive_paths=case_sensitive_paths,
+        )
     elif archive_type == "zip":
         _extract_zip(archive, payload, strip_components)
     elif archive_type == "7z-sfx":
@@ -504,10 +541,6 @@ def extract_upstream(
                 executable,
                 "x",
                 "-y",
-                "-spf-",
-                "-snl-",
-                "-snh-",
-                "-sns-",
                 f"-o{payload}",
                 str(archive),
             ],
@@ -521,7 +554,7 @@ def extract_upstream(
             raise PackBuildError(f"7-Zip extraction failed: {completed.stdout[-2000:]}")
     else:
         raise PackBuildError(f"unsupported upstream archive: {archive_type}")
-    _validate_physical_tree(payload)
+    _validate_physical_tree(payload, case_sensitive_paths=case_sensitive_paths)
 
 
 def _probe_command(component_id: str, name: str, executable: Path) -> list[str]:
@@ -743,6 +776,7 @@ def build_pack(
             component["archiveType"],
             component["stripComponents"],
             payload,
+            case_sensitive_paths=target.startswith("linux-"),
         )
         probe_payload(component_id, component["version"], component["executables"], payload)
         collect_licenses(payload, pack_root / "licenses")
