@@ -51,11 +51,11 @@ def test_release_workflow_can_only_create_a_draft() -> None:
     assert "OPENSQUILLA_TRUSTED_WINDOWS_CI" in workflow
 
 
-def test_oss_workflow_has_no_moving_alias_and_uses_separate_credentials() -> None:
+def test_oss_workflow_has_no_moving_alias_and_uses_reviewed_shared_bucket() -> None:
     workflow, _parsed = _workflow("mirror-oss.yml")
     assert "runtime-packs/${RELEASE_TAG}/${name}" in workflow
-    assert "RUNTIME_PACK_OSS_ACCESS_KEY_ID" in workflow
-    assert "RUNTIME_PACK_OSS_ACCESS_KEY_SECRET" in workflow
+    assert "ALIYUN_OSS_ACCESS_KEY_ID" in workflow
+    assert "ALIYUN_OSS_ACCESS_KEY_SECRET" in workflow
     assert "stable.json" not in workflow
     assert "latest.json" not in workflow
     assert "/latest/" not in workflow
@@ -63,8 +63,16 @@ def test_oss_workflow_has_no_moving_alias_and_uses_separate_credentials() -> Non
     assert "get-bucket-versioning" in workflow
     assert "list-objects-v2" in workflow
     assert "OSS exact object set mismatch" in workflow
+    assert "Require anonymous client downloads to match the release bytes" in workflow
+    assert "https://${OSS_BUCKET}.oss-cn-beijing.aliyuncs.com/runtime-packs/" in workflow
+    assert "Anonymous OSS readback mismatch" in workflow
     assert '"opensquilla-releases"' in workflow
+    assert '"opensquilla-runtime-packs"' not in workflow
     assert '"https://oss-cn-beijing.aliyuncs.com"' in workflow
+    assert "head-object" in workflow
+    assert "expected one non-null OSS Version ID" in workflow
+    assert "oss-version-ids.json" in workflow
+    assert 'active != {"enabled"}' in workflow
 
 
 def test_all_external_actions_are_pinned_to_full_commit_sha() -> None:
@@ -83,8 +91,8 @@ def test_every_workflow_is_valid_yaml() -> None:
 
 def test_catalog_identity_matches_release_tag_contract() -> None:
     sources = json.loads((ROOT / "sources.json").read_text(encoding="utf-8"))
-    assert sources["catalogVersion"] == "2026-07-30.1"
-    assert sources["releaseTag"] == "v2026.07.30.1"
+    assert sources["catalogVersion"] == "2026-08-21.1"
+    assert sources["releaseTag"] == "v2026.08.21.1"
 
 
 def test_repository_publishes_the_complete_apache_2_license() -> None:

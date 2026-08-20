@@ -27,11 +27,11 @@ jobs:
     timeout-minutes: 180
     environment: runtime-pack-oss
     env:
-      OSS_BUCKET: ${{ vars.RUNTIME_PACK_OSS_BUCKET }}
-      OSS_ACCESS_KEY_ID: ${{ secrets.RUNTIME_PACK_OSS_ACCESS_KEY_ID }}
-      OSS_ACCESS_KEY_SECRET: ${{ secrets.RUNTIME_PACK_OSS_ACCESS_KEY_SECRET }}
+      OSS_BUCKET: opensquilla-releases
+      OSS_ACCESS_KEY_ID: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
+      OSS_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
       OSS_REGION: cn-beijing
-      OSS_ENDPOINT: ${{ vars.RUNTIME_PACK_OSS_ENDPOINT }}
+      OSS_ENDPOINT: https://oss-cn-beijing.aliyuncs.com
     steps:
       - name: Resolve and validate published tag
         id: release
@@ -88,9 +88,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          [[ -n "${OSS_BUCKET}" ]] || { echo 'Missing RUNTIME_PACK_OSS_BUCKET' >&2; exit 1; }
-          [[ -n "${OSS_ACCESS_KEY_ID}" ]] || { echo 'Missing RUNTIME_PACK_OSS_ACCESS_KEY_ID' >&2; exit 1; }
-          [[ -n "${OSS_ACCESS_KEY_SECRET}" ]] || { echo 'Missing RUNTIME_PACK_OSS_ACCESS_KEY_SECRET' >&2; exit 1; }
+          [[ -n "${OSS_ACCESS_KEY_ID}" ]] || { echo 'Missing ALIYUN_OSS_ACCESS_KEY_ID' >&2; exit 1; }
+          [[ -n "${OSS_ACCESS_KEY_SECRET}" ]] || { echo 'Missing ALIYUN_OSS_ACCESS_KEY_SECRET' >&2; exit 1; }
           [[ "${OSS_BUCKET}" == "opensquilla-releases" ]] || {
             echo 'Runtime Packs must mirror to the reviewed opensquilla-releases bucket.' >&2
             exit 1
@@ -120,7 +119,7 @@ jobs:
           echo "${OSSUTIL_SHA256}  ${OSSUTIL_ZIP}" | sha256sum -c -
           unzip -q "${OSSUTIL_ZIP}"
           sudo install -m 0755 "ossutil-${OSSUTIL_VERSION}-linux-amd64/ossutil" /usr/local/bin/ossutil
-      - name: Require overwrite-safe bucket versioning state
+      - name: Require recovery-safe bucket versioning state
         shell: bash
         run: |
           set -euo pipefail
@@ -144,11 +143,11 @@ jobs:
                   for child in node:
                       yield from statuses(child)
 
-          active = list(statuses(value))
-          if active:
+          active = {status.casefold() for status in statuses(value)}
+          if active != {"enabled"}:
               raise SystemExit(
-                  "OSS bucket versioning must be unconfigured because PutObject "
-                  f"forbid-overwrite is ignored when versioning is active or suspended: {active}"
+                  "The shared OSS bucket must have versioning enabled so every Runtime Pack "
+                  f"write receives a recoverable version ID; observed states: {sorted(active)}"
               )
           PY
       - name: Mirror only immutable version-scoped objects and read them back
@@ -157,7 +156,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p readback
+          mkdir -p readback oss-head
+          : > oss-version-ids.tsv
           object_exists() {
             local object="$1"
             local listing
@@ -177,12 +177,50 @@ jobs:
               exit 1
             }
           }
+          record_version_id() {
+            local name="$1"
+            local key="runtime-packs/${RELEASE_TAG}/${name}"
+            local metadata="oss-head/${name}.json"
+            ossutil api head-object \
+              --bucket "${OSS_BUCKET}" \
+              --key "${key}" \
+              --endpoint "${OSS_ENDPOINT}" \
+              --output-format json > "${metadata}"
+            METADATA_PATH="${metadata}" python - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          value = json.loads(Path(os.environ["METADATA_PATH"]).read_text(encoding="utf-8"))
+
+          def version_ids(node):
+              if isinstance(node, dict):
+                  for key, child in node.items():
+                      normalized = re.sub(r"[^a-z0-9]", "", key.casefold())
+                      if normalized in {"versionid", "xossversionid"} and isinstance(child, str):
+                          if child and child.casefold() != "null":
+                              yield child
+                      yield from version_ids(child)
+              elif isinstance(node, list):
+                  for child in node:
+                      yield from version_ids(child)
+
+          found = list(dict.fromkeys(version_ids(value)))
+          if len(found) != 1:
+              raise SystemExit(f"expected one non-null OSS Version ID, got {found}")
+          print(found[0])
+          PY
+          }
           for source in release-dist/*; do
             name="$(basename "${source}")"
             object="oss://${OSS_BUCKET}/runtime-packs/${RELEASE_TAG}/${name}"
             if object_exists "${object}"; then
               verify_object "${source}" "${name}"
-              echo "Existing immutable object matches: ${object}"
+              version_id="$(record_version_id "${name}")"
+              printf '%s\t%s\t%s\n' "${name}" "runtime-packs/${RELEASE_TAG}/${name}" "${version_id}" \
+                >> oss-version-ids.tsv
+              echo "Existing version-scoped object matches: ${object}"
               continue
             else
               status="$?"
@@ -198,11 +236,54 @@ jobs:
               --endpoint "${OSS_ENDPOINT}"; then
               if object_exists "${object}"; then
                 verify_object "${source}" "${name}"
-                continue
+              else
+                exit 1
               fi
-              exit 1
             fi
             verify_object "${source}" "${name}"
+            version_id="$(record_version_id "${name}")"
+            printf '%s\t%s\t%s\n' "${name}" "runtime-packs/${RELEASE_TAG}/${name}" "${version_id}" \
+              >> oss-version-ids.tsv
+          done
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          objects = {}
+          for line in Path("oss-version-ids.tsv").read_text(encoding="utf-8").splitlines():
+              name, key, version_id = line.split("\t")
+              if name in objects:
+                  raise SystemExit(f"duplicate OSS Version ID entry: {name}")
+              objects[name] = {"key": key, "versionId": version_id}
+          expected = {path.name for path in Path("release-dist").iterdir() if path.is_file()}
+          if objects.keys() != expected:
+              raise SystemExit(
+                  f"OSS Version ID set mismatch; missing={sorted(expected - objects.keys())}, "
+                  f"extra={sorted(objects.keys() - expected)}"
+              )
+          Path("oss-version-ids.json").write_text(
+              json.dumps({"objects": objects}, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
+      - name: Require anonymous client downloads to match the release bytes
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir public-readback
+          for source in release-dist/*; do
+            name="$(basename "${source}")"
+            url="https://${OSS_BUCKET}.oss-cn-beijing.aliyuncs.com/runtime-packs/${RELEASE_TAG}/${name}"
+            curl --fail --silent --show-error --location --retry 3 \
+              --output "public-readback/${name}" "${url}"
+            local_sha="$(sha256sum "${source}" | awk '{print $1}')"
+            public_sha="$(sha256sum "public-readback/${name}" | awk '{print $1}')"
+            [[ "${local_sha}" == "${public_sha}" ]] || {
+              echo "Anonymous OSS readback mismatch for ${name}" >&2
+              exit 1
+            }
           done
       - name: Verify GitHub and OSS inventories byte for byte
         shell: bash
@@ -256,3 +337,10 @@ jobs:
           diff -u \
             <(cd release-dist && sha256sum -- * | sort) \
             <(cd readback && sha256sum -- * | sort)
+      - name: Preserve exact OSS version IDs for audit
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: runtime-pack-oss-version-ids-${{ steps.release.outputs.tag }}
+          path: oss-version-ids.json
+          if-no-files-found: error
+          retention-days: 90

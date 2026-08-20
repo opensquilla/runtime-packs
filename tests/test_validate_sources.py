@@ -17,7 +17,7 @@ def _valid() -> dict:
 
 def test_checked_in_sources_are_complete_and_native() -> None:
     value = load_sources(ROOT / "sources.json")
-    assert value["catalogVersion"] == "2026-07-30.1"
+    assert value["catalogVersion"] == "2026-08-21.1"
     assert set(value["targets"]) == {
         "darwin-arm64",
         "darwin-x64",
@@ -45,8 +45,8 @@ def test_rejects_non_https_or_unapproved_origin() -> None:
 
 def test_rejects_missing_native_runner_label() -> None:
     value = _valid()
-    value["targets"]["windows-arm64"]["runner"] = ["self-hosted", "opensquilla-runtime"]
-    with pytest.raises(SourceValidationError, match="native organization runner"):
+    value["targets"]["windows-arm64"]["runner"] = ["windows-latest"]
+    with pytest.raises(SourceValidationError, match="reviewed GitHub-hosted runner"):
         validate_sources(value)
 
 

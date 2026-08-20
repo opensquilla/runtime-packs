@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import subprocess
 import tarfile
 from pathlib import Path
 
@@ -13,6 +14,8 @@ from scripts.build_pack import (
     _audit_7z_listing_text,
     _deterministic_tar_xz,
     _extract_tar,
+    _verify_authenticode_signature,
+    collect_licenses,
     sha256_file,
 )
 from scripts.generate_release import (
@@ -94,6 +97,66 @@ def test_git_sfx_listing_rejects_traversal_and_links() -> None:
         _audit_7z_listing_text("Path = ../../outside.exe\n")
     with pytest.raises(PackBuildError, match="contains a link"):
         _audit_7z_listing_text("Path = bin/bash.exe\nSymbolic Link = ../../outside\n")
+
+
+def test_authenticode_gate_accepts_only_a_valid_named_signer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    signed = tmp_path / "PortableGit.exe"
+    signed.write_bytes(b"signed")
+    monkeypatch.setattr("scripts.build_pack.shutil.which", lambda _name: "pwsh")
+
+    def run(*_args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert kwargs["env"]["OPENSQUILLA_SIGNATURE_PATH"] == str(signed.resolve())
+        return subprocess.CompletedProcess(
+            args=["pwsh"],
+            returncode=0,
+            stdout=json.dumps({"Status": "Valid", "Subject": "CN=Git for Windows"}),
+        )
+
+    monkeypatch.setattr("scripts.build_pack.subprocess.run", run)
+    _verify_authenticode_signature(signed)
+
+
+@pytest.mark.parametrize(
+    ("returncode", "signature"),
+    [
+        (0, {"Status": "NotSigned", "Subject": ""}),
+        (0, {"Status": "Valid", "Subject": ""}),
+        (1, {"Status": "Valid", "Subject": "CN=Git for Windows"}),
+    ],
+)
+def test_authenticode_gate_rejects_invalid_results(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    returncode: int,
+    signature: dict[str, str],
+) -> None:
+    signed = tmp_path / "PortableGit.exe"
+    signed.write_bytes(b"unsigned")
+    monkeypatch.setattr("scripts.build_pack.shutil.which", lambda _name: "pwsh")
+    monkeypatch.setattr(
+        "scripts.build_pack.subprocess.run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            args=["pwsh"], returncode=returncode, stdout=json.dumps(signature)
+        ),
+    )
+    with pytest.raises(PackBuildError, match="invalid Authenticode signature"):
+        _verify_authenticode_signature(signed)
+
+
+def test_collect_licenses_preserves_more_than_one_hundred_files(tmp_path: Path) -> None:
+    payload = tmp_path / "payload"
+    for index in range(101):
+        path = payload / f"dependency-{index:03d}" / "LICENSE"
+        path.parent.mkdir(parents=True)
+        path.write_text(f"license {index}\n", encoding="utf-8")
+    destination = tmp_path / "licenses"
+    collect_licenses(payload, destination)
+    copied = sorted(destination.iterdir())
+    assert len(copied) == 101
+    assert copied[0].name.startswith("00001__")
+    assert copied[-1].name.startswith("00101__")
 
 
 def test_deterministic_tar_has_identical_bytes(tmp_path: Path) -> None:
