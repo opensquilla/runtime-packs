@@ -30,6 +30,9 @@ MAX_UNPACKED_BYTES = 4 * 1024**3
 MAX_MEMBERS = 250_000
 MAX_EXPANSION_RATIO = 400
 COPY_CHUNK_BYTES = 1024 * 1024
+MAX_LICENSE_FILES = 10_000
+MAX_LICENSE_FILE_BYTES = 5 * 1024**2
+MAX_LICENSE_TOTAL_BYTES = 128 * 1024**2
 LICENSE_NAMES = re.compile(r"^(license|licence|copying|copyright|notice)([._-].*)?$", re.I)
 MACHINE_ALIASES = {
     "amd64": "x64",
@@ -419,6 +422,50 @@ def _audit_7z_listing_text(listing: str) -> None:
         raise PackBuildError("7-Zip did not report any Git Bash SFX members")
 
 
+def _verify_authenticode_signature(path: Path) -> None:
+    powershell = (
+        shutil.which("pwsh")
+        or shutil.which("powershell")
+        or shutil.which("powershell.exe")
+    )
+    if powershell is None:
+        raise PackBuildError("PowerShell is required for the Git Bash Authenticode gate")
+    environment = os.environ.copy()
+    environment["OPENSQUILLA_SIGNATURE_PATH"] = str(path.resolve())
+    script = (
+        "$signature = Get-AuthenticodeSignature -LiteralPath "
+        "$env:OPENSQUILLA_SIGNATURE_PATH; "
+        "[PSCustomObject]@{Status=[string]$signature.Status; "
+        "Subject=[string]$signature.SignerCertificate.Subject} | "
+        "ConvertTo-Json -Compress"
+    )
+    completed = subprocess.run(
+        [powershell, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=120,
+        env=environment,
+    )
+    try:
+        signature = json.loads(completed.stdout.strip())
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise PackBuildError(
+            f"cannot audit Authenticode signature for {path.name}: {completed.stdout[-1000:]}"
+        ) from exc
+    if (
+        completed.returncode != 0
+        or not isinstance(signature, Mapping)
+        or signature.get("Status") != "Valid"
+        or not isinstance(signature.get("Subject"), str)
+        or not signature["Subject"].strip()
+    ):
+        raise PackBuildError(
+            f"invalid Authenticode signature for {path.name}: {completed.stdout[-1000:]}"
+        )
+
+
 def extract_upstream(
     archive: Path,
     archive_type: str,
@@ -437,6 +484,7 @@ def extract_upstream(
         )
         if platform.system() != "Windows" or strip_components != 0 or not trusted_ci:
             raise PackBuildError("Git Bash SFX may be unpacked only by native Windows CI")
+        _verify_authenticode_signature(archive)
         executable = shutil.which("7z") or shutil.which("7za")
         if executable is None:
             raise PackBuildError("7-Zip is required on the trusted Git Bash build runner")
@@ -506,6 +554,8 @@ def probe_payload(
             raise PackBuildError(f"required executable is missing: {relative}")
         if name not in probe_names:
             continue
+        if component_id == "gitBash":
+            _verify_authenticode_signature(executable)
         completed = subprocess.run(
             _probe_command(component_id, name, executable),
             cwd=payload,
@@ -531,19 +581,24 @@ def probe_payload(
 
 
 def collect_licenses(payload: Path, destination: Path) -> None:
-    candidates = [
-        path
-        for path in payload.rglob("*")
-        if path.is_file()
-        and LICENSE_NAMES.fullmatch(path.name)
-        and path.stat().st_size <= 5 * 1024**2
-    ]
+    candidates: list[Path] = []
+    total_bytes = 0
+    for path in payload.rglob("*"):
+        if not path.is_file() or not LICENSE_NAMES.fullmatch(path.name):
+            continue
+        size = path.stat().st_size
+        if size > MAX_LICENSE_FILE_BYTES:
+            raise PackBuildError(f"upstream license file exceeds the safety limit: {path.name}")
+        candidates.append(path)
+        total_bytes += size
+        if len(candidates) > MAX_LICENSE_FILES or total_bytes > MAX_LICENSE_TOTAL_BYTES:
+            raise PackBuildError("upstream license set exceeds the safety limit")
     if not candidates:
         raise PackBuildError("upstream payload contains no auditable license file")
     destination.mkdir(parents=True, exist_ok=False)
-    for index, source in enumerate(sorted(candidates, key=lambda item: item.as_posix())[:100], 1):
+    for index, source in enumerate(sorted(candidates, key=lambda item: item.as_posix()), 1):
         relative = source.relative_to(payload).as_posix().replace("/", "__")
-        target = destination / f"{index:03d}__{relative}"
+        target = destination / f"{index:05d}__{relative}"
         shutil.copyfile(source, target)
 
 

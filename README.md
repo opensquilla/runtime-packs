@@ -39,7 +39,11 @@ system and CPU architecture. Source archives, versions, and digests are pinned i
 - Historical Runtime Pack digests must be unique, lowercase SHA-256 values and must
   never repeat the current pack digest. The first release starts with empty histories.
 - Git for Windows self-extracting archives are unpacked only inside trusted CI; the
-  OpenSquilla client never downloads or executes the SFX.
+  OpenSquilla client never downloads or executes the SFX. The native Windows build
+  also requires valid Authenticode signatures on the SFX and the probed Git/Bash
+  executables before any of them can enter a Runtime Pack.
+- Every discovered upstream license/notice file is preserved. Explicit per-file,
+  count, and total-size bounds fail the build instead of silently truncating notices.
 - Pack extraction rejects traversal, link escapes, special files, duplicate paths,
   and expansion beyond declared limits. Safe internal upstream links are resolved inside
   the reviewed archive namespace and materialized as regular files; links never ship
@@ -59,19 +63,34 @@ controls:
   OSS.
 - Protect the `runtime-pack-release` and `runtime-pack-oss` environments with required
   reviewers. Only the former may create a Draft Release; it never publishes one.
-- Register isolated organization runners with the exact labels declared in
-  `sources.json`. Every runner needs Python 3.12; Windows runners also need a trusted
-  7-Zip CLI. Do not attach these labels to general-purpose or fork-controlled runners.
-- Create the `opensquilla-releases` bucket in `cn-beijing` with bucket versioning
-  unconfigured. OSS ignores `forbid-overwrite` when versioning is enabled or
-  suspended, so the workflow refuses either state.
-- Give the mirror RAM identity only list/read/create access under
-  `runtime-packs/*`. It must not have `DeleteObject`, unrestricted overwrite, bucket
-  administration, or access to desktop update-channel paths. Keep the access key only
-  in the protected `runtime-pack-oss` environment.
-- Set `RUNTIME_PACK_OSS_BUCKET=opensquilla-releases` and
-  `RUNTIME_PACK_OSS_ENDPOINT=https://oss-cn-beijing.aliyuncs.com`. The workflow rejects
-  other destinations and never writes a moving `latest` or `stable` alias.
+- The reviewed matrix uses standard GitHub-hosted native runners declared in
+  `sources.json`: macOS arm64/x64, Linux arm64/x64, and Windows arm64/x64. This avoids
+  persistent organization runners and keeps every build on the target architecture.
+  Windows images must continue to provide the trusted 7-Zip and PowerShell tools used
+  by the Git Bash extraction and Authenticode gates.
+- Reuse the reviewed `opensquilla-releases` bucket in `cn-beijing`, but isolate every
+  object under `runtime-packs/<release-tag>/`. Bucket versioning must remain enabled so
+  every write has a recoverable Version ID. OSS ignores `forbid-overwrite` on a
+  versioned bucket, so the workflow never relies on that header: an existing object is
+  accepted only when its downloaded SHA-256 already matches the GitHub Release byte.
+- The workflow itself only lists, reads, and creates objects under `runtime-packs/*`;
+  it has no delete or desktop update-channel operation. Keep the reused access key
+  behind required reviewers in the protected `runtime-pack-oss` environment. When RAM
+  policy changes become available, replace it with a prefix-scoped identity rather
+  than expanding the existing credential further.
+- Allow anonymous `GetObject` only for `runtime-packs/*`; do not grant anonymous
+  `ListObjects`, write, delete, or bucket-administration permissions. The mirror job
+  downloads every object again over the exact unsigned public client URL and compares
+  its SHA-256 before succeeding.
+- Expose the existing encrypted `ALIYUN_OSS_ACCESS_KEY_ID` and
+  `ALIYUN_OSS_ACCESS_KEY_SECRET` to the protected `runtime-pack-oss` environment.
+  GitHub secrets are repository-scoped, so using the same values in this repository
+  still requires an environment or organization secret grant; the values are never
+  copied by a workflow. The bucket and Beijing endpoint are fixed in the workflow,
+  which never writes a moving `latest` or `stable` alias.
+- Preserve the generated `oss-version-ids.json` workflow artifact for each mirror run.
+  It records the exact current Version ID of every verified object without changing
+  the immutable GitHub Release.
 
 Before approving a Draft Release, reviewers must independently confirm every upstream
 URL and SHA-256 pin, all fourteen native probe jobs, the exact asset inventory,

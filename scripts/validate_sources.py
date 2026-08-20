@@ -20,6 +20,14 @@ TARGET_COMPONENTS = {
     "windows-arm64": ("python", "node", "gitBash"),
     "windows-x64": ("python", "node", "gitBash"),
 }
+TARGET_RUNNERS = {
+    "darwin-arm64": ["macos-15"],
+    "darwin-x64": ["macos-15-intel"],
+    "linux-arm64": ["ubuntu-24.04-arm"],
+    "linux-x64": ["ubuntu-24.04"],
+    "windows-arm64": ["windows-11-arm"],
+    "windows-x64": ["windows-2025"],
+}
 COMPONENT_EXECUTABLES = {
     "python": {"python"},
     "node": {"node", "npm", "npx"},
@@ -186,12 +194,10 @@ def validate_sources(raw: Any) -> dict[str, Any]:
         if set(target_value) != {"runner", *expected_components}:
             raise SourceValidationError(f"targets.{target} has an incomplete component matrix")
         runner = target_value["runner"]
-        expected_runner = ["self-hosted", "opensquilla-runtime", target]
-        if target.startswith("linux-"):
-            expected_runner.append("glibc")
+        expected_runner = TARGET_RUNNERS[target]
         if not isinstance(runner, list) or runner != expected_runner:
             raise SourceValidationError(
-                f"targets.{target}.runner must exactly identify the native organization runner"
+                f"targets.{target}.runner must exactly identify the reviewed GitHub-hosted runner"
             )
         for component_id in expected_components:
             component = target_value[component_id]
