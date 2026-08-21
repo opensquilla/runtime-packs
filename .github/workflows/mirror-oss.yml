@@ -331,9 +331,23 @@ jobs:
           RELEASE_TAG='${{ steps.release.outputs.tag }}' python - <<'PY'
           import json
           import os
+          import re
           from pathlib import Path
 
-          value = json.loads(Path("oss-inventory.json").read_text(encoding="utf-8"))
+          def load_ossutil_json(path: str) -> object:
+              raw = Path(path).read_text(encoding="utf-8")
+              document = raw.lstrip("\ufeff \t\r\n")
+              if not document.startswith(("{", "[")):
+                  raise ValueError(
+                      "ossutil output does not start with a JSON object or array"
+                  )
+              value, end = json.JSONDecoder().raw_decode(document)
+              trailing = document[end:].strip()
+              if trailing and not re.fullmatch(r"\d+(?:\.\d+)?\(s\) elapsed", trailing):
+                  raise ValueError("unexpected output after ossutil JSON document")
+              return value
+
+          value = load_ossutil_json("oss-inventory.json")
           expected = {
               f"runtime-packs/{os.environ['RELEASE_TAG']}/{path.name}"
               for path in Path("release-dist").iterdir()
