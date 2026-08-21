@@ -569,18 +569,47 @@ def _probe_command(component_id: str, name: str, executable: Path) -> list[str]:
     raise PackBuildError(f"no probe for {component_id}.{name}")
 
 
+def normalize_node_launchers(executables: Mapping[str, str], payload: Path) -> None:
+    """Repair npm launchers whose upstream symlinks were safely materialized."""
+
+    for name in ("npm", "npx"):
+        relative = PurePosixPath(executables[name])
+        if relative.suffix.casefold() == ".cmd":
+            continue
+        launcher = payload.joinpath(*relative.parts)
+        cli_relative = PurePosixPath("lib", "node_modules", "npm", "bin", f"{name}-cli.js")
+        cli = payload.joinpath(*cli_relative.parts)
+        if not launcher.is_file() or not cli.is_file():
+            raise PackBuildError(f"Node.js {name} launcher target is missing")
+        if launcher.read_bytes() != cli.read_bytes():
+            raise PackBuildError(f"Node.js {name} launcher is not the reviewed upstream link")
+        launcher.write_bytes(
+            (
+                "#!/usr/bin/env node\n"
+                f"require('../{cli_relative.as_posix()}')\n"
+            ).encode()
+        )
+        launcher.chmod(0o755)
+
+
 def probe_payload(
     component_id: str,
     version: str,
+    bin_dirs: list[str],
     executables: Mapping[str, str],
     payload: Path,
 ) -> None:
     outputs: dict[str, str] = {}
     probe_names = {
         "python": {"python"},
-        "node": {"node"},
+        "node": {"node", "npm", "npx"},
         "gitBash": {"git", "bash"},
     }[component_id]
+    environment = os.environ.copy()
+    path_key = next((key for key in environment if key.casefold() == "path"), "PATH")
+    environment[path_key] = os.pathsep.join(
+        str(payload.joinpath(*PurePosixPath(relative).parts)) for relative in bin_dirs
+    )
     for name, relative in sorted(executables.items()):
         executable = payload.joinpath(*PurePosixPath(relative).parts)
         if not executable.is_file():
@@ -597,6 +626,7 @@ def probe_payload(
             stderr=subprocess.STDOUT,
             text=True,
             timeout=60,
+            env=environment,
         )
         output = completed.stdout.strip()
         if completed.returncode != 0 or not output:
@@ -778,7 +808,15 @@ def build_pack(
             payload,
             case_sensitive_paths=target.startswith("linux-"),
         )
-        probe_payload(component_id, component["version"], component["executables"], payload)
+        if component_id == "node":
+            normalize_node_launchers(component["executables"], payload)
+        probe_payload(
+            component_id,
+            component["version"],
+            component["binDirs"],
+            component["executables"],
+            payload,
+        )
         collect_licenses(payload, pack_root / "licenses")
         manifest = {
             "schemaVersion": 1,
