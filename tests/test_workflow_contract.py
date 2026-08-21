@@ -74,8 +74,8 @@ def test_oss_workflow_has_no_moving_alias_and_uses_reviewed_shared_bucket() -> N
     assert "oss-version-ids.json" in workflow
     assert 'active != {"enabled"}' in workflow
     assert "load_ossutil_json" in workflow
-    assert workflow.count("JSONDecoder().raw_decode") == 2
-    assert workflow.count("unexpected output after ossutil JSON document") == 2
+    assert workflow.count("JSONDecoder().raw_decode") == 3
+    assert workflow.count("unexpected output after ossutil JSON document") == 3
     assert "candidates = child if isinstance(child, list) else [child]" in workflow
 
 
