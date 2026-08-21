@@ -128,10 +128,9 @@ jobs:
             --endpoint "${OSS_ENDPOINT}" \
             --output-format json > bucket-versioning.json
           python - <<'PY'
-          import json
-          from pathlib import Path
+          from scripts.ossutil_json import load_ossutil_json
 
-          value = json.loads(Path("bucket-versioning.json").read_text(encoding="utf-8"))
+          value = load_ossutil_json("bucket-versioning.json")
 
           def statuses(node):
               if isinstance(node, dict):
@@ -187,12 +186,11 @@ jobs:
               --endpoint "${OSS_ENDPOINT}" \
               --output-format json > "${metadata}"
             METADATA_PATH="${metadata}" python - <<'PY'
-          import json
           import os
           import re
-          from pathlib import Path
+          from scripts.ossutil_json import load_ossutil_json
 
-          value = json.loads(Path(os.environ["METADATA_PATH"]).read_text(encoding="utf-8"))
+          value = load_ossutil_json(os.environ["METADATA_PATH"])
 
           def version_ids(node):
               if isinstance(node, dict):
