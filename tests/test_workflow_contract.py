@@ -76,6 +76,7 @@ def test_oss_workflow_has_no_moving_alias_and_uses_reviewed_shared_bucket() -> N
     assert "load_ossutil_json" in workflow
     assert workflow.count("JSONDecoder().raw_decode") == 2
     assert workflow.count("unexpected output after ossutil JSON document") == 2
+    assert "candidates = child if isinstance(child, list) else [child]" in workflow
 
 
 def test_all_external_actions_are_pinned_to_full_commit_sha() -> None:
