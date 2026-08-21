@@ -74,7 +74,8 @@ def test_oss_workflow_has_no_moving_alias_and_uses_reviewed_shared_bucket() -> N
     assert "oss-version-ids.json" in workflow
     assert 'active != {"enabled"}' in workflow
     assert "load_ossutil_json" in workflow
-    assert "scripts.ossutil_json" in workflow
+    assert workflow.count("JSONDecoder().raw_decode") == 2
+    assert workflow.count("unexpected output after ossutil JSON document") == 2
 
 
 def test_all_external_actions_are_pinned_to_full_commit_sha() -> None:

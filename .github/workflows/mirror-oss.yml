@@ -128,7 +128,22 @@ jobs:
             --endpoint "${OSS_ENDPOINT}" \
             --output-format json > bucket-versioning.json
           python - <<'PY'
-          from scripts.ossutil_json import load_ossutil_json
+          import json
+          import re
+          from pathlib import Path
+
+          def load_ossutil_json(path: str) -> object:
+              raw = Path(path).read_text(encoding="utf-8")
+              document = raw.lstrip("\ufeff \t\r\n")
+              if not document.startswith(("{", "[")):
+                  raise ValueError(
+                      "ossutil output does not start with a JSON object or array"
+                  )
+              value, end = json.JSONDecoder().raw_decode(document)
+              trailing = document[end:].strip()
+              if trailing and not re.fullmatch(r"\d+(?:\.\d+)?\(s\) elapsed", trailing):
+                  raise ValueError("unexpected output after ossutil JSON document")
+              return value
 
           value = load_ossutil_json("bucket-versioning.json")
 
@@ -186,9 +201,23 @@ jobs:
               --endpoint "${OSS_ENDPOINT}" \
               --output-format json > "${metadata}"
             METADATA_PATH="${metadata}" python - <<'PY'
+          import json
           import os
           import re
-          from scripts.ossutil_json import load_ossutil_json
+          from pathlib import Path
+
+          def load_ossutil_json(path: str) -> object:
+              raw = Path(path).read_text(encoding="utf-8")
+              document = raw.lstrip("\ufeff \t\r\n")
+              if not document.startswith(("{", "[")):
+                  raise ValueError(
+                      "ossutil output does not start with a JSON object or array"
+                  )
+              value, end = json.JSONDecoder().raw_decode(document)
+              trailing = document[end:].strip()
+              if trailing and not re.fullmatch(r"\d+(?:\.\d+)?\(s\) elapsed", trailing):
+                  raise ValueError("unexpected output after ossutil JSON document")
+              return value
 
           value = load_ossutil_json(os.environ["METADATA_PATH"])
 
