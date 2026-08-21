@@ -225,9 +225,15 @@ jobs:
               if isinstance(node, dict):
                   for key, child in node.items():
                       normalized = re.sub(r"[^a-z0-9]", "", key.casefold())
-                      if normalized in {"versionid", "xossversionid"} and isinstance(child, str):
-                          if child and child.casefold() != "null":
-                              yield child
+                      if normalized in {"versionid", "xossversionid"}:
+                          candidates = child if isinstance(child, list) else [child]
+                          for candidate in candidates:
+                              if (
+                                  isinstance(candidate, str)
+                                  and candidate
+                                  and candidate.casefold() != "null"
+                              ):
+                                  yield candidate
                       yield from version_ids(child)
               elif isinstance(node, list):
                   for child in node:
