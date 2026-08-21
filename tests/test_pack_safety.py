@@ -17,6 +17,7 @@ from scripts.build_pack import (
     _register_path_shape,
     _verify_authenticode_signature,
     collect_licenses,
+    normalize_node_launchers,
     sha256_file,
 )
 from scripts.generate_release import (
@@ -70,6 +71,30 @@ def test_tar_extraction_materializes_safe_internal_symlink(tmp_path: Path) -> No
     _extract_tar(archive, payload, 1)
     assert (payload / "bin" / "tool").read_bytes() == b"tool\n"
     assert not (payload / "bin" / "tool").is_symlink()
+
+
+def test_node_launcher_normalization_repairs_materialized_npm_symlinks(
+    tmp_path: Path,
+) -> None:
+    payload = tmp_path / "payload"
+    cli_root = payload / "lib" / "node_modules" / "npm" / "bin"
+    cli_root.mkdir(parents=True)
+    (payload / "bin").mkdir()
+    executables = {"node": "bin/node", "npm": "bin/npm", "npx": "bin/npx"}
+    for name in ("npm", "npx"):
+        original = f"#!/usr/bin/env node\n// {name}\n".encode()
+        (cli_root / f"{name}-cli.js").write_bytes(original)
+        (payload / "bin" / name).write_bytes(original)
+
+    normalize_node_launchers(executables, payload)
+
+    for name in ("npm", "npx"):
+        launcher = payload / "bin" / name
+        assert launcher.read_text(encoding="utf-8") == (
+            "#!/usr/bin/env node\n"
+            f"require('../lib/node_modules/npm/bin/{name}-cli.js')\n"
+        )
+        assert launcher.stat().st_mode & 0o111
 
 
 @pytest.mark.parametrize("name", ["root/NUL.txt", "root/file:stream", "root/trailing. "])

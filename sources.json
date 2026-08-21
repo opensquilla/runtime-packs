@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "catalogVersion": "2026-08-21.1",
-  "releaseTag": "v2026.08.21.1",
+  "catalogVersion": "2026-08-21.2",
+  "releaseTag": "v2026.08.21.2",
   "sourceDateEpoch": 1787270400,
   "targets": {
     "darwin-arm64": {

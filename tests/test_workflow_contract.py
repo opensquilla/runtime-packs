@@ -91,8 +91,8 @@ def test_every_workflow_is_valid_yaml() -> None:
 
 def test_catalog_identity_matches_release_tag_contract() -> None:
     sources = json.loads((ROOT / "sources.json").read_text(encoding="utf-8"))
-    assert sources["catalogVersion"] == "2026-08-21.1"
-    assert sources["releaseTag"] == "v2026.08.21.1"
+    assert sources["catalogVersion"] == "2026-08-21.2"
+    assert sources["releaseTag"] == "v2026.08.21.2"
 
 
 def test_repository_publishes_the_complete_apache_2_license() -> None:

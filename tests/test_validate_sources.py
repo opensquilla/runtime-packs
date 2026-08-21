@@ -17,7 +17,7 @@ def _valid() -> dict:
 
 def test_checked_in_sources_are_complete_and_native() -> None:
     value = load_sources(ROOT / "sources.json")
-    assert value["catalogVersion"] == "2026-08-21.1"
+    assert value["catalogVersion"] == "2026-08-21.2"
     assert set(value["targets"]) == {
         "darwin-arm64",
         "darwin-x64",
